@@ -4,6 +4,7 @@ import { DESCRIPTION_TRUNCATE_LENGTH } from '../constants';
 import { TECH_DISPLAY_NAMES } from '../skills/techSkillMap';
 import { SkillCollection } from '../skills/collections';
 import { UserCollection } from '../skills/UserCollections';
+import { ActivityEntry, ActivityState } from '../activity/AgentActivityTracker';
 
 /** Human-readable display names for category slugs shown in the sidebar. */
 const CATEGORY_DISPLAY_NAMES: Record<string, string> = {
@@ -108,6 +109,97 @@ const CATEGORY_ICONS: Record<string, string> = {
   consulting: 'comment-discussion',
   performance: 'dashboard',
 };
+
+function activityIcon(state: ActivityState): vscode.ThemeIcon {
+  switch (state) {
+    case 'pending':
+      return new vscode.ThemeIcon('circle-outline', new vscode.ThemeColor('descriptionForeground'));
+    case 'running':
+      return new vscode.ThemeIcon('sync~spin');
+    case 'success':
+      return new vscode.ThemeIcon('pass-filled', new vscode.ThemeColor('testing.iconPassed'));
+    case 'error':
+      return new vscode.ThemeIcon('error', new vscode.ThemeColor('errorForeground'));
+  }
+}
+
+export class ActivitySectionDividerItem extends vscode.TreeItem {
+  readonly contextValue = 'activityDivider';
+
+  constructor() {
+    super('────────────────', vscode.TreeItemCollapsibleState.None);
+    this.tooltip = '';
+    this.iconPath = new vscode.ThemeIcon('blank', new vscode.ThemeColor('editorGroup.border'));
+  }
+}
+
+export class ActivitySectionGapItem extends vscode.TreeItem {
+  readonly contextValue = 'activityGap';
+
+  constructor(index?: number) {
+    super('\u00A0', vscode.TreeItemCollapsibleState.None);
+    if (index !== undefined) {
+      this.id = `activity-gap-${index}`;
+    }
+    this.tooltip = '';
+  }
+}
+
+export class LiveAgentActivitySectionItem extends vscode.TreeItem {
+  readonly contextValue = 'liveAgentActivity';
+
+  constructor(isActive: boolean) {
+    super('Live Agent Activity', vscode.TreeItemCollapsibleState.Expanded);
+    this.id = 'liveAgentActivity';
+    this.description = isActive ? 'active' : 'idle';
+    this.tooltip = 'Real-time status of skill resolve and install operations';
+    this.iconPath = new vscode.ThemeIcon('pulse');
+  }
+}
+
+export class ActivityStepsGapItem extends vscode.TreeItem {
+  readonly contextValue = 'activityStepsGap';
+
+  constructor() {
+    super('\u00A0', vscode.TreeItemCollapsibleState.None);
+    this.id = 'activity-steps-gap';
+    this.tooltip = '';
+  }
+}
+
+export class ActivityStatusLineItem extends vscode.TreeItem {
+  readonly contextValue = 'activityStatusLine';
+
+  constructor(label: string, value: string) {
+    super(label, vscode.TreeItemCollapsibleState.None);
+    this.description = value;
+    this.iconPath = new vscode.ThemeIcon(
+      'circle-small',
+      new vscode.ThemeColor('descriptionForeground')
+    );
+  }
+}
+
+export class AgentActivityPlaceholderItem extends vscode.TreeItem {
+  readonly contextValue = 'agentActivityPlaceholder';
+
+  constructor() {
+    super('No activity yet — install a skill to see status', vscode.TreeItemCollapsibleState.None);
+    this.tooltip = 'Install or load a skill to see resolve and install progress here.';
+    this.iconPath = new vscode.ThemeIcon('info', new vscode.ThemeColor('descriptionForeground'));
+  }
+}
+
+export class AgentActivityItem extends vscode.TreeItem {
+  readonly contextValue = 'agentActivity';
+
+  constructor(entry: ActivityEntry) {
+    super(entry.label, vscode.TreeItemCollapsibleState.None);
+    this.id = entry.id;
+    this.description = entry.statusText || undefined;
+    this.iconPath = activityIcon(entry.state);
+  }
+}
 
 export class SummaryItem extends vscode.TreeItem {
   readonly contextValue = 'summary';
@@ -421,6 +513,13 @@ export class AllCategoriesItem extends vscode.TreeItem {
 }
 
 export type SkillTreeNode =
+  | ActivitySectionDividerItem
+  | ActivitySectionGapItem
+  | LiveAgentActivitySectionItem
+  | AgentActivityItem
+  | AgentActivityPlaceholderItem
+  | ActivityStepsGapItem
+  | ActivityStatusLineItem
   | SummaryItem
   | CategoryItem
   | FavoritesCategoryItem

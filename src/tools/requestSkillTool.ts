@@ -2,6 +2,8 @@ import * as vscode from 'vscode';
 import { SkillsManager } from '../skills/SkillsManager';
 import { isValidSkillId } from '../security';
 import { log } from '../logger';
+import { AgentActivityTracker } from '../activity/AgentActivityTracker';
+import { trackSkillResolveAndLoad } from '../activity/trackSkillInstall';
 
 interface RequestSkillInput {
   skillId: string;
@@ -23,7 +25,10 @@ interface RequestSkillInput {
  *     content as a LanguageModelToolResult so Copilot can incorporate it.
  */
 export class RequestSkillTool implements vscode.LanguageModelTool<RequestSkillInput> {
-  constructor(private readonly manager: SkillsManager) {}
+  constructor(
+    private readonly manager: SkillsManager,
+    private readonly activityTracker?: AgentActivityTracker
+  ) {}
 
   prepareInvocation(
     options: vscode.LanguageModelToolInvocationPrepareOptions<RequestSkillInput>,
@@ -89,8 +94,8 @@ export class RequestSkillTool implements vscode.LanguageModelTool<RequestSkillIn
       ]);
     }
 
-    // Install if not already present.
-    if (!this.manager.isInstalled(skillId)) {
+    const wasInstalled = this.manager.isInstalled(skillId);
+    if (!wasInstalled) {
       log(`RequestSkillTool: installing "${skillId}"…`);
       try {
         await vscode.commands.executeCommand('aiSkills.install', skillId);
@@ -104,14 +109,24 @@ export class RequestSkillTool implements vscode.LanguageModelTool<RequestSkillIn
           ),
         ]);
       }
+
+      const isInstalledNow = this.manager.isInstalled(skillId);
+      if (!isInstalledNow) {
+        log(`RequestSkillTool: install check failed for "${skillId}" after invalidating cache`);
+        return new vscode.LanguageModelToolResult([
+          new vscode.LanguageModelTextPart(
+            `Failed to install skill "${skillId}". Please install it manually via the AI Skills sidebar or run "AI Skills: Install Skill".`
+          ),
+        ]);
+      }
     } else {
       log(`RequestSkillTool: "${skillId}" already installed, loading content`);
     }
 
-    // Read and return ALL files in the skill directory, not just SKILL.md.
-    // Some skills contain supplementary .md files in subdirectories that are
-    // equally important for Copilot's context (e.g. patterns/, examples/, etc.)
-    const skillFiles = await this.manager.readSkillDirectory(skill);
+    const skillFiles =
+      this.activityTracker && this.manager.isInstalled(skillId)
+        ? await trackSkillResolveAndLoad(this.activityTracker, skillId, this.manager, skill)
+        : await this.manager.readSkillDirectory(skill);
     if (skillFiles.size === 0) {
       return new vscode.LanguageModelToolResult([
         new vscode.LanguageModelTextPart(
@@ -166,6 +181,12 @@ function buildCombinedContent(skillId: string, files: Map<string, string>): stri
  * Registers the RequestSkillTool with the VS Code language model system and
  * returns a Disposable to clean up on extension deactivation.
  */
-export function registerRequestSkillTool(manager: SkillsManager): vscode.Disposable {
-  return vscode.lm.registerTool('aiSkills_requestSkill', new RequestSkillTool(manager));
+export function registerRequestSkillTool(
+  manager: SkillsManager,
+  activityTracker?: AgentActivityTracker
+): vscode.Disposable {
+  return vscode.lm.registerTool(
+    'aiSkills_requestSkill',
+    new RequestSkillTool(manager, activityTracker)
+  );
 }

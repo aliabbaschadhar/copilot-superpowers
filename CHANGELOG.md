@@ -8,10 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased] — Project rename
 
+### Added
+
+- **Live Agent Activity** sidebar section shows real-time resolve/install steps for sidebar installs, browse, bulk/collection installs, Copilot LM tools, and `@aiSkills` chat loads. Exactly two steps per operation (`Loading skill` → `Installed` / `Done`) with a permanent status panel (Skill, Status, Time) below the steps. Spacer rows separate the section from the catalog above (no divider line). Section is always visible at the bottom of the Skills tree.
+
 ### Changed
 
+- Uses **Bun** scripts (e.g., `bun run compile:watch`) for the pre-launch/compile workflow, matching project scripts and `bun.lock`.
 - Extension renamed from **AI Agent Superpowers** (`agent-superpowers`) to **Copilot Superpowers** (`copilot-superpowers`).
 - Auto-patches the workspace `.gitignore` with `.agent/skills/` and `.agent/skills-catalog.md` the first time a skill is installed — keeping installed skills local and untracked.
+
+### Fixed
+
+- Added a workspace file watcher for the local `.agent/skills/` directory to automatically refresh the Skills tree view when skills are added, modified, or deleted without requiring manual refreshes.
 
 ---
 

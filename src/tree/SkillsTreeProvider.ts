@@ -2,6 +2,11 @@ import * as vscode from 'vscode';
 import { SkillsManager } from '../skills/SkillsManager';
 import { SkillEntry } from '../skills/types';
 import {
+  ActivitySectionGapItem,
+  ActivityStatusLineItem,
+  ActivityStepsGapItem,
+  AgentActivityItem,
+  AgentActivityPlaceholderItem,
   AllCategoriesItem,
   CategoryItem,
   CollectionItem,
@@ -10,18 +15,22 @@ import {
   GettingStartedItem,
   GettingStartedTipItem,
   InstalledSectionItem,
+  LiveAgentActivitySectionItem,
   RecommendedSectionItem,
   SkillItem,
   SummaryItem,
   SkillTreeNode,
   UserCollectionItem,
 } from './nodes';
+import { AgentActivityTracker } from '../activity/AgentActivityTracker';
 import { CTX_INSTALLED_FILTER } from '../constants';
 import { FavoriteSkills } from '../favoriteSkills';
 import { SKILL_COLLECTIONS } from '../skills/collections';
 import { UserCollections } from '../skills/UserCollections';
 
-export class SkillsTreeProvider implements vscode.TreeDataProvider<SkillTreeNode> {
+export class SkillsTreeProvider
+  implements vscode.TreeDataProvider<SkillTreeNode>, vscode.Disposable
+{
   private readonly _onDidChangeTreeData = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
@@ -29,13 +38,22 @@ export class SkillsTreeProvider implements vscode.TreeDataProvider<SkillTreeNode
   private recommendedSkills: SkillEntry[] = [];
   private detectedTechs: string[] = [];
   private outdatedIds: Set<string> = new Set();
+  private readonly _activityDisposable: vscode.Disposable | undefined;
 
   constructor(
     private readonly manager: SkillsManager,
     private readonly favoriteSkills: FavoriteSkills,
     private readonly userCollections: UserCollections,
-    private readonly showOnboarding: boolean = false
-  ) {}
+    private readonly showOnboarding: boolean = false,
+    private readonly activityTracker?: AgentActivityTracker
+  ) {
+    this._activityDisposable = activityTracker?.onDidChange(() => this._onDidChangeTreeData.fire());
+  }
+
+  dispose(): void {
+    this._activityDisposable?.dispose();
+    this._onDidChangeTreeData.dispose();
+  }
 
   /** Update recommended skills from workspace scan. Always triggers a tree refresh. */
   setRecommendations(skills: SkillEntry[], techs: string[]): void {
@@ -79,6 +97,34 @@ export class SkillsTreeProvider implements vscode.TreeDataProvider<SkillTreeNode
   getChildren(el?: SkillTreeNode): SkillTreeNode[] {
     if (!el) {
       return this.buildRootChildren();
+    }
+
+    if (el instanceof LiveAgentActivitySectionItem) {
+      if (!this.activityTracker) {
+        return [];
+      }
+
+      const status = this.activityTracker.getStatusDetail();
+      const steps = this.activityTracker.getDisplaySteps();
+
+      if (steps.length === 0 && status.phase === 'idle') {
+        return [
+          new AgentActivityPlaceholderItem(),
+          new ActivityStepsGapItem(),
+          new ActivityStatusLineItem('Skill', status.skillId),
+          new ActivityStatusLineItem('Status', status.detail),
+          new ActivityStatusLineItem('Time', '—'),
+        ];
+      }
+
+      const time = new Date(status.timestamp).toLocaleTimeString();
+      return [
+        ...steps.map((entry) => new AgentActivityItem(entry)),
+        new ActivityStepsGapItem(),
+        new ActivityStatusLineItem('Skill', status.skillId),
+        new ActivityStatusLineItem('Status', `${status.detail} · ${status.phase}`),
+        new ActivityStatusLineItem('Time', time),
+      ];
     }
 
     if (el instanceof GettingStartedItem) {
@@ -256,6 +302,17 @@ export class SkillsTreeProvider implements vscode.TreeDataProvider<SkillTreeNode
           })
       : [new AllCategoriesItem(categories.length)];
 
+    const activityBlock: SkillTreeNode[] = this.activityTracker
+      ? [
+          new ActivitySectionGapItem(1),
+          new ActivitySectionGapItem(2),
+          new ActivitySectionGapItem(3),
+          new ActivitySectionGapItem(4),
+          new ActivitySectionGapItem(5),
+          new LiveAgentActivitySectionItem(this.activityTracker.hasActiveOperation()),
+        ]
+      : [];
+
     return [
       new SummaryItem(total, installedCount),
       ...onboarding,
@@ -264,6 +321,7 @@ export class SkillsTreeProvider implements vscode.TreeDataProvider<SkillTreeNode
       ...installedSection,
       ...collections,
       ...categoryNodes,
+      ...activityBlock,
     ];
   }
 

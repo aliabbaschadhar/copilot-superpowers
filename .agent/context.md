@@ -6,6 +6,30 @@ Running log of decisions, discoveries, and session context for the **AI Agent Su
 
 ## Session Log
 
+### 2026-06-02 (CodeRabbit Review Resolutions — feature/live-agent-activity)
+
+**Status:** Completed.
+
+**What was changed:**
+
+- **`src/commands/browseSkills.ts`** — Surfaced `outcome.message` in error toasts on install failures.
+- **`src/commands/installSkill.ts`** — Integrated `isValidSkillId` validator in `runInstall` and computed real target path for the success notification.
+- **`src/commands/installBulk.ts` & `src/extension.ts`** — Updated registration wrappers to accept and pass `tracker` and `context` arguments. Pushed `treeProvider` to extension subscriptions.
+- **`src/chat/SkillsChatParticipant.ts`** — Deferred `isValidSkillId` validation to happen after exact/fuzzy resolution.
+- **`src/tools/requestSkillTool.ts`** — Dynamicized install status check (`isInstalled`) during loading to track newly installed skills.
+- **`src/tree/SkillsTreeProvider.ts`** — Placed the `Live Agent Activity` section at the end of the tree, separated from the above categories by 5 blank spacer items (`ActivitySectionGapItem`).
+
+### 2026-06-02 (Skills Tree Auto-Refresh File System Watcher)
+
+**Status:** Completed.
+
+**What was changed:**
+
+- **`src/tree/SkillsTreeProvider.ts`** — Implemented `vscode.workspace.createFileSystemWatcher` monitoring the `.agent/skills/` directory.
+- **`src/tree/SkillsTreeProvider.ts`** — Added event listener to `onDidChange` on the watcher to trigger `this._onDidChangeTreeData.fire()` on file creation, deletion, or modification events.
+- **`src/extension.ts`** — Implemented `setupSkillsFileWatcher` to watch the project-local `.agent/skills/` directory for any file system events (creation, modification, deletion). Pushed to extension subscriptions for leak protection.
+- **`CHANGELOG.md`** — Documented the automatic sidebar tree view refresh fix under the `[Unreleased]` section.
+
 ### 2026-03-11 (README & documentation — editor-only focus)
 
 **Status:** Complete.

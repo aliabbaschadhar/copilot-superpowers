@@ -1,18 +1,22 @@
 import * as vscode from 'vscode';
 import { SkillsManager } from '../skills/SkillsManager';
 import { ProjectLocalInstaller } from '../installers/projectLocalInstaller';
-import { InstallOptions, InstallResult } from '../installers/types';
-import { ERR_SKILL_NOT_FOUND, ERR_CONTENT_MISSING } from '../constants';
+import { InstallOptions } from '../installers/types';
+import { ERR_SKILL_NOT_FOUND } from '../constants';
 import { RecentSkills } from '../recentSkills';
 import { SkillUpdateTracker } from '../skills/SkillUpdateTracker';
 import { maybePushToChat } from '../chat/openInChat';
 import { patchGitignoreOnFirstInstall } from '../gitignore/patchGitignore';
+import { AgentActivityTracker } from '../activity/AgentActivityTracker';
+import { trackSkillResolveAndInstall } from '../activity/trackSkillInstall';
+import { isValidSkillId } from '../security';
 
 export function registerInstallCommand(
   manager: SkillsManager,
   recentSkills: RecentSkills,
   tracker?: SkillUpdateTracker,
-  context?: vscode.ExtensionContext
+  context?: vscode.ExtensionContext,
+  activityTracker?: AgentActivityTracker
 ): vscode.Disposable {
   return vscode.commands.registerCommand('aiSkills.install', async (skillId?: string) => {
     let resolvedId = skillId;
@@ -35,23 +39,67 @@ export function registerInstallCommand(
       return;
     }
 
-    const skillFiles = await manager.readSkillDirectory(skill);
-    const content = skillFiles.get('SKILL.md') ?? (await manager.readContent(skill));
-    if (!content) {
-      vscode.window.showErrorMessage(ERR_CONTENT_MISSING(resolvedId));
-      return;
-    }
-
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    const opts: InstallOptions = {
-      skillId: resolvedId,
-      skillContent: content,
-      skillFiles: skillFiles.size > 1 ? skillFiles : undefined,
-      workspaceRoot,
-      tracker,
+
+    const runInstall = async () => {
+      if (!resolvedId || !isValidSkillId(resolvedId)) {
+        return {
+          success: false,
+          message: `Invalid skill ID '${resolvedId || ''}'.`,
+        };
+      }
+
+      if (!workspaceRoot) {
+        return {
+          success: false,
+          message: 'No workspace folder is open. Open a project folder first, then install skills.',
+        };
+      }
+
+      if (!activityTracker) {
+        const skillFiles = await manager.readSkillDirectory(skill);
+        const content = skillFiles.get('SKILL.md') ?? (await manager.readContent(skill));
+        if (!content) {
+          return { success: false, message: 'Content missing' };
+        }
+        const opts: InstallOptions = {
+          skillId: resolvedId!,
+          skillContent: content,
+          skillFiles: skillFiles.size > 1 ? skillFiles : undefined,
+          workspaceRoot,
+          tracker,
+        };
+        const result = await new ProjectLocalInstaller().install(opts);
+        return { success: result.success, message: result.message };
+      }
+
+      return trackSkillResolveAndInstall(
+        activityTracker,
+        resolvedId!,
+        manager,
+        skill,
+        async (skillFiles, content) => {
+          if (!workspaceRoot) {
+            return {
+              success: false,
+              message:
+                'No workspace folder is open. Open a project folder first, then install skills.',
+            };
+          }
+          const opts: InstallOptions = {
+            skillId: resolvedId!,
+            skillContent: content,
+            skillFiles: skillFiles.size > 1 ? skillFiles : undefined,
+            workspaceRoot,
+            tracker,
+          };
+          const result = await new ProjectLocalInstaller().install(opts);
+          return { success: result.success, message: result.message };
+        }
+      );
     };
 
-    let result: InstallResult | undefined;
+    let outcome: { success: boolean; message?: string } | undefined;
     await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
@@ -59,32 +107,48 @@ export function registerInstallCommand(
         cancellable: false,
       },
       async () => {
-        result = await new ProjectLocalInstaller().install(opts);
+        outcome = await runInstall();
       }
     );
 
-    if (!result) {
+    if (!outcome) {
       return;
     }
 
-    if (result.success) {
-      recentSkills.add(resolvedId);
-      // Patch .gitignore on the first skill install in this workspace
+    if (outcome.success) {
+      recentSkills.add(resolvedId!);
       if (context) {
         await patchGitignoreOnFirstInstall(context);
       }
-      const action = await vscode.window.showInformationMessage(result.message, 'Open File');
-      if (action === 'Open File' && result.destPath) {
+      let destPath: string | undefined;
+      if (workspaceRoot) {
         try {
-          await vscode.window.showTextDocument(vscode.Uri.file(result.destPath));
+          destPath = new ProjectLocalInstaller().targetPath({
+            skillId: resolvedId!,
+            skillContent: '',
+            workspaceRoot,
+          });
+        } catch {
+          // ignore
+        }
+      }
+      const displayPath = destPath
+        ? vscode.workspace.asRelativePath(destPath)
+        : `.agent/skills/${resolvedId}/SKILL.md`;
+      const action = await vscode.window.showInformationMessage(
+        `Installed to ${displayPath}`,
+        'Open File'
+      );
+      if (action === 'Open File' && destPath) {
+        try {
+          await vscode.window.showTextDocument(vscode.Uri.file(destPath));
         } catch {
           // File may not be readable in all editors
         }
       }
-      // Auto-inject skill context into chat, honouring the openChatOnInstall setting.
-      await maybePushToChat([resolvedId]);
+      await maybePushToChat([resolvedId!]);
     } else {
-      vscode.window.showErrorMessage(`AI Skills: ${result.message}`);
+      vscode.window.showErrorMessage(`AI Skills: ${outcome.message ?? 'Install failed'}`);
     }
   });
 }
@@ -95,7 +159,6 @@ type TreeItemArg = { skill: { id: string } } | string | undefined;
 /** Also register the tree-context install command (same handler, different command id). */
 export function registerInstallFromTreeCommand(_manager: SkillsManager): vscode.Disposable {
   return vscode.commands.registerCommand('aiSkills.installFromTree', async (item?: TreeItemArg) => {
-    // item is a SkillItem from the tree context
     let skillId: string | undefined;
     if (item && typeof item === 'object' && 'skill' in item) {
       skillId = item.skill.id;

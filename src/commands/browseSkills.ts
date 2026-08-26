@@ -9,6 +9,8 @@ import { FuzzySearch } from '../skills/FuzzySearch';
 import { ProjectLocalInstaller } from '../installers/projectLocalInstaller';
 import { InstallOptions } from '../installers/types';
 import { openSkillsInChat } from '../chat/openInChat';
+import { AgentActivityTracker } from '../activity/AgentActivityTracker';
+import { trackSkillResolveAndInstall } from '../activity/trackSkillInstall';
 
 /**
  * Parses special filter prefixes from browse query text.
@@ -108,7 +110,8 @@ function toQuickPickItem(skill: SkillEntry, isFavorite = false): vscode.QuickPic
 async function handleSkillSelection(
   skillId: string,
   manager: SkillsManager,
-  recentSkills: RecentSkills
+  recentSkills: RecentSkills,
+  activityTracker?: AgentActivityTracker
 ): Promise<void> {
   recentSkills.add(skillId);
 
@@ -118,20 +121,46 @@ async function handleSkillSelection(
     return;
   }
 
-  const skillFiles = await manager.readSkillDirectory(skill);
-  const content = skillFiles.get('SKILL.md') ?? (await manager.readContent(skill));
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-
   if (!workspaceRoot) {
     vscode.window.showWarningMessage('Open a workspace folder to install skills project-locally.');
     return;
   }
-  if (!content) {
-    vscode.window.showWarningMessage(`Skill '${skillId}' has no readable content.`);
-    return;
+
+  const runInstall = async (skillFiles: Map<string, string>, content: string) => {
+    return await installSkillLocally(skill.id, content, skillFiles, workspaceRoot);
+  };
+
+  if (activityTracker) {
+    const outcome = await trackSkillResolveAndInstall(
+      activityTracker,
+      skillId,
+      manager,
+      skill,
+      runInstall
+    );
+    if (!outcome?.success) {
+      vscode.window.showErrorMessage(
+        outcome?.message || `Failed to resolve or install skill '${skillId}'.`
+      );
+      return;
+    }
+  } else {
+    const skillFiles = await manager.readSkillDirectory(skill);
+    const content = skillFiles.get('SKILL.md') ?? (await manager.readContent(skill));
+    if (!content) {
+      vscode.window.showWarningMessage(`Skill '${skillId}' has no readable content.`);
+      return;
+    }
+    const outcome = await installSkillLocally(skill.id, content, skillFiles, workspaceRoot);
+    if (!outcome.success) {
+      vscode.window.showErrorMessage(
+        outcome.message || `Failed to install skill '${skillId}' locally.`
+      );
+      return;
+    }
   }
 
-  await installSkillLocally(skill.id, content, skillFiles, workspaceRoot);
   await openSkillsInChat([skill.id]);
 }
 
@@ -140,10 +169,10 @@ async function installSkillLocally(
   content: string,
   skillFiles: Map<string, string>,
   workspaceRoot: string
-): Promise<void> {
+): Promise<{ success: boolean; message?: string }> {
   const skillInstallDir = path.join(workspaceRoot, '.agent', 'skills', skillId);
   if (fs.existsSync(path.join(skillInstallDir, 'SKILL.md'))) {
-    return;
+    return { success: true };
   }
   const opts: InstallOptions = {
     skillId,
@@ -152,9 +181,11 @@ async function installSkillLocally(
     workspaceRoot,
   };
   try {
-    await new ProjectLocalInstaller().install(opts);
-  } catch {
-    // Non-fatal — still proceed to attach context
+    const result = await new ProjectLocalInstaller().install(opts);
+    return { success: result.success, message: result.message };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { success: false, message };
   }
 }
 
@@ -163,7 +194,8 @@ async function installSkillLocally(
 export function registerBrowseCommand(
   manager: SkillsManager,
   recentSkills: RecentSkills,
-  favoriteSkills: FavoriteSkills
+  favoriteSkills: FavoriteSkills,
+  activityTracker?: AgentActivityTracker
 ): vscode.Disposable {
   return vscode.commands.registerCommand('aiSkills.browse', async () => {
     const skills = manager.getAll();
@@ -351,7 +383,7 @@ export function registerBrowseCommand(
             .replace(/\$\([^)]+\)\s*/g, '') // remove every $(icon) and trailing whitespace
             .replace(/^\//, '') // remove leading slash
             .trim();
-          await handleSkillSelection(skillId, manager, recentSkills);
+          await handleSkillSelection(skillId, manager, recentSkills, activityTracker);
         }
       });
 

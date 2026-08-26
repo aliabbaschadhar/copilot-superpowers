@@ -7,8 +7,13 @@ test-out/
 *.vsix
 .vscode-test/
 npm-debug.log*
+.marscode
 
 # Auto-generated skills catalog (re-created by the extension on each remote sync)
 .agent/skills-catalog.md
 .agent/skills/
 .env
+
+# VS Code (ignore user settings but track launch.json configurations)
+.vscode/*
+!.vscode/launch.json

@@ -1,9 +1,11 @@
 import * as vscode from 'vscode';
 import { SkillsManager } from '../skills/SkillsManager';
 import { SkillEntry } from '../skills/types';
-import { isValidSkillId } from '../security';
+import { isValidSkillId, isPathWithin } from '../security';
 import { SkillUpdateTracker } from '../skills/SkillUpdateTracker';
 import { ProjectLocalInstaller } from '../installers/projectLocalInstaller';
+import { AgentActivityTracker } from '../activity/AgentActivityTracker';
+import { trackSkillResolveAndInstall } from '../activity/trackSkillInstall';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -42,7 +44,8 @@ interface BatchInstallJsonResponse {
 export class BatchInstallTool implements vscode.LanguageModelTool<BatchInstallInput> {
   constructor(
     private readonly manager: SkillsManager,
-    private readonly tracker: SkillUpdateTracker
+    private readonly tracker: SkillUpdateTracker,
+    private readonly activityTracker?: AgentActivityTracker
   ) {}
 
   prepareInvocation(
@@ -161,7 +164,8 @@ export class BatchInstallTool implements vscode.LanguageModelTool<BatchInstallIn
         workspaceRoot,
         overwrite,
         this.manager,
-        this.tracker
+        this.tracker,
+        this.activityTracker
       );
 
       results.push(result);
@@ -193,7 +197,8 @@ export async function installSkill(
   workspaceRoot: string,
   overwrite: boolean,
   manager: SkillsManager,
-  tracker: SkillUpdateTracker
+  tracker: SkillUpdateTracker,
+  activityTracker?: AgentActivityTracker
 ): Promise<BatchInstallResult> {
   try {
     const installer = new ProjectLocalInstaller();
@@ -203,7 +208,6 @@ export async function installSkill(
       workspaceRoot,
     });
 
-    // Check if already installed
     if (!overwrite && fs.existsSync(destPath)) {
       return {
         skillId: skill.id,
@@ -213,50 +217,84 @@ export async function installSkill(
       };
     }
 
-    // Read skill content
-    const skillFiles = await manager.readSkillDirectory(skill);
-    const content = skillFiles.get('SKILL.md');
+    const writeSkill = async (
+      skillFiles: Map<string, string>,
+      content: string
+    ): Promise<{ success: boolean; message?: string } | undefined> => {
+      if (!isValidSkillId(skill.id)) {
+        return { success: false, message: 'invalid skill id' };
+      }
 
-    if (!content) {
+      const skillDir = path.dirname(destPath);
+      // Validate all paths first
+      for (const relPath of skillFiles.keys()) {
+        if (relPath === 'SKILL.md') {
+          continue;
+        }
+        const companionDest = path.join(skillDir, relPath);
+        if (!isPathWithin(skillDir, companionDest)) {
+          return { success: false, message: 'invalid companion path' };
+        }
+      }
+
+      fs.mkdirSync(skillDir, { recursive: true });
+      fs.writeFileSync(destPath, content, 'utf-8');
+
+      for (const [relPath, fileContent] of skillFiles.entries()) {
+        if (relPath === 'SKILL.md') {
+          continue;
+        }
+        const companionDest = path.join(skillDir, relPath);
+        fs.mkdirSync(path.dirname(companionDest), { recursive: true });
+        fs.writeFileSync(companionDest, fileContent, 'utf-8');
+      }
+
+      tracker.setHash(skill.id, content);
+      manager.invalidateInstallCache();
+
+      return { success: true, message: `Installed to ${destPath}` };
+    };
+
+    if (activityTracker) {
+      const outcome = await trackSkillResolveAndInstall(
+        activityTracker,
+        skill.id,
+        manager,
+        skill,
+        writeSkill
+      );
+      if (!outcome) {
+        return { skillId: skill.id, success: false, message: 'Failed to read skill content' };
+      }
       return {
         skillId: skill.id,
-        success: false,
-        message: `Failed to read skill content`,
+        success: outcome.success,
+        message: outcome.message ?? (outcome.success ? `Installed to ${destPath}` : 'Failed'),
+        installedPath: outcome.success ? destPath : undefined,
       };
     }
 
-    // Create directory and write files
-    const skillDir = path.dirname(destPath);
-    fs.mkdirSync(skillDir, { recursive: true });
-    fs.writeFileSync(destPath, content, 'utf-8');
-
-    // Write companion files
-    for (const [relPath, fileContent] of skillFiles.entries()) {
-      if (relPath === 'SKILL.md') {
-        continue;
+    let skillFiles = await manager.readSkillDirectory(skill);
+    let content = skillFiles.get('SKILL.md');
+    if (!content) {
+      content = (await manager.readContent(skill)) ?? undefined;
+      if (content) {
+        skillFiles = new Map([['SKILL.md', content]]);
       }
-      const companionDest = path.join(skillDir, relPath);
-      fs.mkdirSync(path.dirname(companionDest), { recursive: true });
-      fs.writeFileSync(companionDest, fileContent, 'utf-8');
     }
-
-    // Update tracker
-    tracker.setHash(skill.id, content);
-    manager.invalidateInstallCache();
-
+    if (!content) {
+      return { skillId: skill.id, success: false, message: 'Failed to read skill content' };
+    }
+    const outcome = await writeSkill(skillFiles, content);
     return {
       skillId: skill.id,
-      success: true,
-      message: `Installed to ${destPath}`,
-      installedPath: destPath,
+      success: outcome?.success ?? false,
+      message: outcome?.message ?? 'Failed',
+      installedPath: outcome?.success ? destPath : undefined,
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return {
-      skillId: skill.id,
-      success: false,
-      message: `Failed: ${msg}`,
-    };
+    return { skillId: skill.id, success: false, message: `Failed: ${msg}` };
   }
 }
 
@@ -327,7 +365,11 @@ function buildBatchInstallResponse(
 
 export function registerBatchInstallTool(
   manager: SkillsManager,
-  tracker: SkillUpdateTracker
+  tracker: SkillUpdateTracker,
+  activityTracker?: AgentActivityTracker
 ): vscode.Disposable {
-  return vscode.lm.registerTool('aiSkills_batchInstall', new BatchInstallTool(manager, tracker));
+  return vscode.lm.registerTool(
+    'aiSkills_batchInstall',
+    new BatchInstallTool(manager, tracker, activityTracker)
+  );
 }

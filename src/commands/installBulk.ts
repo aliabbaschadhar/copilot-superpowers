@@ -16,6 +16,9 @@ import { ProjectLocalInstaller } from '../installers/projectLocalInstaller';
 import { SkillUpdateTracker } from '../skills/SkillUpdateTracker';
 import { maybePushToChat } from '../chat/openInChat';
 import { patchGitignoreOnFirstInstall } from '../gitignore/patchGitignore';
+import { AgentActivityTracker } from '../activity/AgentActivityTracker';
+import { trackSkillResolveAndInstall } from '../activity/trackSkillInstall';
+import { isValidSkillId, isPathWithin } from '../security';
 
 // ─── Path helper ──────────────────────────────────────────────────────────────
 
@@ -67,18 +70,33 @@ async function installSingleSkill(
   workspaceRoot: string,
   overwriteExisting: boolean | null,
   manager: SkillsManager,
-  tracker: SkillUpdateTracker | undefined
+  tracker: SkillUpdateTracker | undefined,
+  activityTracker?: AgentActivityTracker
 ): Promise<'installed' | 'skipped' | 'failed'> {
   const destPath = computeTargetPath(skill.id, workspaceRoot);
   if (overwriteExisting === false && fs.existsSync(destPath)) {
     return 'skipped';
   }
-  try {
-    const skillFiles = await manager.readSkillDirectory(skill);
-    const content = skillFiles.get('SKILL.md') ?? (await manager.readContent(skill));
-    if (!content) {
-      return 'failed';
+
+  const writeSkill = async (
+    skillFiles: Map<string, string>,
+    content: string
+  ): Promise<{ success: boolean; message?: string } | undefined> => {
+    if (!isValidSkillId(skill.id)) {
+      return { success: false, message: 'invalid skill id' };
     }
+
+    const skillDir = path.dirname(destPath);
+    for (const relPath of skillFiles.keys()) {
+      if (relPath === 'SKILL.md') {
+        continue;
+      }
+      const resolvedPath = path.join(skillDir, relPath);
+      if (!isPathWithin(skillDir, resolvedPath)) {
+        return { success: false, message: 'invalid companion path' };
+      }
+    }
+
     const opts: InstallOptions = {
       skillId: skill.id,
       skillContent: content,
@@ -86,13 +104,34 @@ async function installSingleSkill(
       workspaceRoot,
     };
     const result = writeDirectly(destPath, opts);
-    if (result.success) {
-      if (tracker) {
-        tracker.setHash(skill.id, content);
-      }
-      return 'installed';
+    if (result.success && tracker) {
+      tracker.setHash(skill.id, content);
     }
-    return 'failed';
+    return { success: result.success, message: result.message };
+  };
+
+  try {
+    if (activityTracker) {
+      const outcome = await trackSkillResolveAndInstall(
+        activityTracker,
+        skill.id,
+        manager,
+        skill,
+        writeSkill
+      );
+      if (!outcome) {
+        return 'failed';
+      }
+      return outcome.success ? 'installed' : 'failed';
+    }
+
+    const skillFiles = await manager.readSkillDirectory(skill);
+    const content = skillFiles.get('SKILL.md') ?? (await manager.readContent(skill));
+    if (!content) {
+      return 'failed';
+    }
+    const outcome = await writeSkill(skillFiles, content);
+    return outcome?.success ? 'installed' : 'failed';
   } catch {
     return 'failed';
   }
@@ -117,7 +156,8 @@ export async function bulkInstall(
   label: string,
   manager: SkillsManager,
   tracker?: SkillUpdateTracker,
-  context?: vscode.ExtensionContext
+  context?: vscode.ExtensionContext,
+  activityTracker?: AgentActivityTracker
 ): Promise<void> {
   if (skills.length === 0) {
     vscode.window.showInformationMessage('AI Skills: No skills to install.');
@@ -184,7 +224,8 @@ export async function bulkInstall(
           workspaceRoot,
           overwriteExisting,
           manager,
-          tracker
+          tracker,
+          activityTracker
         );
         counts[outcome]++;
         if (outcome === 'installed') {
@@ -260,7 +301,12 @@ async function bulkUninstallSkills(
 // ─── Command registrations ─────────────────────────────────────────────────────
 
 /** Right-click a category node → "Install All in Category" */
-export function registerInstallCategoryCommand(manager: SkillsManager): vscode.Disposable {
+export function registerInstallCategoryCommand(
+  manager: SkillsManager,
+  tracker?: SkillUpdateTracker,
+  context?: vscode.ExtensionContext,
+  activityTracker?: AgentActivityTracker
+): vscode.Disposable {
   return vscode.commands.registerCommand(
     'aiSkills.installCategory',
     async (item?: CategoryItem) => {
@@ -269,7 +315,14 @@ export function registerInstallCategoryCommand(manager: SkillsManager): vscode.D
         return;
       }
       const skills = manager.getByCategory(item.category);
-      await bulkInstall(skills, `"${item.category}" (${skills.length} skills)`, manager);
+      await bulkInstall(
+        skills,
+        `"${item.category}" (${skills.length} skills)`,
+        manager,
+        tracker,
+        context,
+        activityTracker
+      );
     }
   );
 }
@@ -277,14 +330,17 @@ export function registerInstallCategoryCommand(manager: SkillsManager): vscode.D
 /** Toolbar button / summary node → "Install All Skills" (respects active filter) */
 export function registerInstallAllCommand(
   manager: SkillsManager,
-  treeProvider: SkillsTreeProvider
+  treeProvider: SkillsTreeProvider,
+  tracker?: SkillUpdateTracker,
+  context?: vscode.ExtensionContext,
+  activityTracker?: AgentActivityTracker
 ): vscode.Disposable {
   return vscode.commands.registerCommand('aiSkills.installAll', async () => {
     const skills = treeProvider.getFilteredSkills();
     const label = treeProvider.isFiltering()
       ? `filtered results (${skills.length} skills)`
       : `all skills (${skills.length})`;
-    await bulkInstall(skills, label, manager);
+    await bulkInstall(skills, label, manager, tracker, context, activityTracker);
   });
 }
 /** Right-click a fully-installed category node → "Uninstall All in Category" */
@@ -349,7 +405,12 @@ export function registerUninstallCollectionCommand(
 }
 
 /** Right-click a collection node → "Install Collection" */
-export function registerInstallCollectionCommand(manager: SkillsManager): vscode.Disposable {
+export function registerInstallCollectionCommand(
+  manager: SkillsManager,
+  tracker?: SkillUpdateTracker,
+  context?: vscode.ExtensionContext,
+  activityTracker?: AgentActivityTracker
+): vscode.Disposable {
   return vscode.commands.registerCommand(
     'aiSkills.installCollection',
     async (item?: CollectionItem | UserCollectionItem | RecommendedSectionItem) => {
@@ -362,7 +423,10 @@ export function registerInstallCollectionCommand(manager: SkillsManager): vscode
         await bulkInstall(
           item.skills,
           `recommended skills (${item.skills.length} skills)`,
-          manager
+          manager,
+          tracker,
+          context,
+          activityTracker
         );
         return;
       }
@@ -387,7 +451,10 @@ export function registerInstallCollectionCommand(manager: SkillsManager): vscode
       await bulkInstall(
         skills,
         `"${collection.name}" collection (${skills.length} skills)`,
-        manager
+        manager,
+        tracker,
+        context,
+        activityTracker
       );
     }
   );
